@@ -1,0 +1,18 @@
+services:
+  api-payment:
+    image: sooyaa1/payment-erpapi:v1
+    container_name: fastapi-payment-api
+    ports:
+      - "8003:8000"  # Map ออกมาที่ Port 8003
+    environment:
+      # เชื่อมต่อไปยัง Hostname 'postgres-db'
+      - DATABASE_URL=postgresql://postgres:postgres@postgres-db:5432/hrdb
+      - API_KEY=chosy-secret-key-2026
+    networks:
+      - erp-network
+    restart: unless-stopped
+
+networks:
+  # เชื่อมต่อกับ network วงกลางที่สร้างไว้ในโปรเจกต์หลัก
+  erp-network:
+    external: true

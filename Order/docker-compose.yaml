@@ -1,0 +1,18 @@
+services:
+  api-order:
+    image: sooyaa1/erp-order-api:v1
+    container_name: fastapi-order-api
+    ports:
+      - "8001:8000"
+    environment:
+      # ชี้ไปที่ชื่อ Service 'postgres-db' จากไฟล์หลัก
+      - DATABASE_URL=postgresql://postgres:postgres@postgres-db:5432/hrdb
+      - API_KEY=chosy-secret-key-2026
+    networks:
+      - erp-network
+    restart: unless-stopped
+
+networks:
+  # เชื่อมต่อกับ network ที่สร้างไว้ในไฟล์หลัก
+  erp-network:
+    external: true
