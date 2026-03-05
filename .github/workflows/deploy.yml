@@ -2,7 +2,6 @@ name: Deploy Microservices
 
 on:
   push:
-    # จะทำงานก็ต่อเมื่อมีการแก้ไขไฟล์ใน Folder เหล่านี้เท่านั้น
     paths:
       - 'Customer/**'
       - 'Invoice/**'
@@ -17,26 +16,24 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 2 # เพื่อให้เช็กได้ว่าไฟล์ไหนเปลี่ยน
+          fetch-depth: 0 # ดึงประวัติทั้งหมดเพื่อให้เปรียบเทียบ diff ได้แม่นยำ
 
       - name: Detect Changed Service
         id: detect
         run: |
-          if git diff --name-only HEAD^ HEAD | grep -q "^Customer/"; then
-             echo "SERVICE_DIR=Customer" >> $GITHUB_ENV
-             echo "PROJECT_NAME=customer" >> $GITHUB_ENV
-          elif git diff --name-only HEAD^ HEAD | grep -q "^Invoice/"; then
-             echo "SERVICE_DIR=Invoice" >> $GITHUB_ENV
-             echo "PROJECT_NAME=invoice" >> $GITHUB_ENV
-          elif git diff --name-only HEAD^ HEAD | grep -q "^Order/"; then
-             echo "SERVICE_DIR=Order" >> $GITHUB_ENV
-             echo "PROJECT_NAME=order" >> $GITHUB_ENV
-          elif git diff --name-only HEAD^ HEAD | grep -q "^Payment/"; then
-             echo "SERVICE_DIR=Payment" >> $GITHUB_ENV
-             echo "PROJECT_NAME=payment" >> $GITHUB_ENV
+          # หาชื่อโฟลเดอร์แรกที่มีการเปลี่ยนแปลง (Customer, Invoice, etc.)
+          # ใช้ --name-only เพื่อดูเฉพาะชื่อไฟล์ และ cut เพื่อเอาชื่อโฟลเดอร์หลัก
+          SERVICE=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '/' | cut -d/ -f1 | head -n1)
+          
+          echo "Detected Service: $SERVICE"
+
+          if [[ "$SERVICE" =~ ^(Customer|Invoice|Order|Payment)$ ]]; then
+             echo "SERVICE_DIR=$SERVICE" >> $GITHUB_ENV
+             # ทำชื่อโปรเจกต์เป็นตัวพิมพ์เล็ก (Lowercase)
+             echo "PROJECT_NAME=$(echo $SERVICE | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
           else
-             echo "No target service changes detected."
-             exit 0
+             echo "❌ ไม่พบโฟลเดอร์ Service ที่ถูกต้อง หรือเป็นการแก้ไขไฟล์นอกโฟลเดอร์หลัก"
+             exit 1
           fi
 
       - name: Setup SSH Key
@@ -46,17 +43,20 @@ jobs:
 
       - name: Sync and Deploy via SSH
         run: |
-          # กำหนดตัวแปรปลายทาง
+          # ป้องกัน Error ถ้าตัวแปรว่าง
+          if [ -z "${{ env.SERVICE_DIR }}" ]; then exit 1; fi
+
           DEPLOY_PATH="/home/${{ secrets.REMOTE_USER }}/deploy/DEPLOY-APIFORLAB"
           DOCKER_HOST_STR="${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}"
           
-          echo "🚀 Deploying: ${{ env.SERVICE_DIR }}"
+          echo "🚀 Starting Deployment for: ${{ env.SERVICE_DIR }}"
 
-          # 1. สร้างโฟลเดอร์ปลายทาง
+          # 1. เตรียมโฟลเดอร์ปลายทาง
           ssh -o StrictHostKeyChecking=no $DOCKER_HOST_STR "mkdir -p $DEPLOY_PATH/${{ env.SERVICE_DIR }}"
 
-          # 2. Rsync ไฟล์ขึ้นเซิร์ฟเวอร์
-          rsync -avz --delete -e "ssh -o StrictHostKeyChecking=no" \
+          # 2. Rsync เฉพาะโฟลเดอร์ที่เลือก และตัด .git ออกไปเพื่อความเร็ว
+          rsync -avz --delete --exclude '.git/' --exclude '.github/' \
+            -e "ssh -o StrictHostKeyChecking=no" \
             ./${{ env.SERVICE_DIR }}/ $DOCKER_HOST_STR:$DEPLOY_PATH/${{ env.SERVICE_DIR }}/
 
           # 3. สั่ง Docker Compose Up
@@ -64,10 +64,12 @@ jobs:
             set -e
             cd $DEPLOY_PATH/${{ env.SERVICE_DIR }}
             if [ -f 'docker-compose.yaml' ] || [ -f 'docker-compose.yml' ]; then
+              echo '✅ Found configuration, deploying...'
               docker compose -p '${{ env.PROJECT_NAME }}' up -d --remove-orphans
-              docker ps --format 'table {{.Names}}\t{{.Status}}'
+              docker ps --filter name=${{ env.PROJECT_NAME }} --format 'table {{.Names}}\t{{.Status}}'
             else
-              echo '❌ docker-compose.yaml not found!'
+              echo '❌ Error: docker-compose.yaml not found in '$DEPLOY_PATH/${{ env.SERVICE_DIR }}
+              ls -la
               exit 1
             fi
           "
