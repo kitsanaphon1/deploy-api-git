@@ -16,24 +16,38 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0 # ดึงประวัติทั้งหมดเพื่อให้เปรียบเทียบ diff ได้แม่นยำ
+          fetch-depth: 0
 
-      - name: Detect Changed Service
-        id: detect
+      # 1. ใช้ Tool มาตรฐานหาว่าโฟลเดอร์ไหนเปลี่ยน
+      - name: Get changed service
+        id: changed-files
+        uses: tj-actions/changed-files@v44
+        with:
+          files_yaml: |
+            Customer:
+              - Customer/**
+            Invoice:
+              - Invoice/**
+            Order:
+              - Order/**
+            Payment:
+              - Payment/**
+
+      - name: Set Service Environment
         run: |
-          # หาชื่อโฟลเดอร์แรกที่มีการเปลี่ยนแปลง (Customer, Invoice, etc.)
-          # ใช้ --name-only เพื่อดูเฉพาะชื่อไฟล์ และ cut เพื่อเอาชื่อโฟลเดอร์หลัก
-          SERVICE=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep '/' | cut -d/ -f1 | head -n1)
-          
-          echo "Detected Service: $SERVICE"
+          # ตรวจสอบว่ามี Service ไหนเปลี่ยนบ้าง (เอาอันแรกที่เจอ)
+          if [ "${{ steps.changed-files.outputs.Customer_any_changed }}" == "true" ]; then SERVICE="Customer";
+          elif [ "${{ steps.changed-files.outputs.Invoice_any_changed }}" == "true" ]; then SERVICE="Invoice";
+          elif [ "${{ steps.changed-files.outputs.Order_any_changed }}" == "true" ]; then SERVICE="Order";
+          elif [ "${{ steps.changed-files.outputs.Payment_any_changed }}" == "true" ]; then SERVICE="Payment";
+          fi
 
-          if [[ "$SERVICE" =~ ^(Customer|Invoice|Order|Payment)$ ]]; then
-             echo "SERVICE_DIR=$SERVICE" >> $GITHUB_ENV
-             # ทำชื่อโปรเจกต์เป็นตัวพิมพ์เล็ก (Lowercase)
-             echo "PROJECT_NAME=$(echo $SERVICE | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+          if [ -n "$SERVICE" ]; then
+            echo "SERVICE_DIR=$SERVICE" >> $GITHUB_ENV
+            echo "PROJECT_NAME=$(echo $SERVICE | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
           else
-             echo "❌ ไม่พบโฟลเดอร์ Service ที่ถูกต้อง หรือเป็นการแก้ไขไฟล์นอกโฟลเดอร์หลัก"
-             exit 1
+            echo "❌ No matching service directory found."
+            exit 1
           fi
 
       - name: Setup SSH Key
@@ -43,32 +57,34 @@ jobs:
 
       - name: Sync and Deploy via SSH
         run: |
-          # ป้องกัน Error ถ้าตัวแปรว่าง
-          if [ -z "${{ env.SERVICE_DIR }}" ]; then exit 1; fi
-
           DEPLOY_PATH="/home/${{ secrets.REMOTE_USER }}/deploy/DEPLOY-APIFORLAB"
           DOCKER_HOST_STR="${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}"
           
-          echo "🚀 Starting Deployment for: ${{ env.SERVICE_DIR }}"
+          echo "🚀 Deploying Service: ${{ env.SERVICE_DIR }}"
 
-          # 1. เตรียมโฟลเดอร์ปลายทาง
+          # สร้างโฟลเดอร์หลักรอไว้
           ssh -o StrictHostKeyChecking=no $DOCKER_HOST_STR "mkdir -p $DEPLOY_PATH/${{ env.SERVICE_DIR }}"
 
-          # 2. Rsync เฉพาะโฟลเดอร์ที่เลือก และตัด .git ออกไปเพื่อความเร็ว
-          rsync -avz --delete --exclude '.git/' --exclude '.github/' \
+          # 2. ปรับการ Rsync (เอา / ออกจากท้ายต้นทาง เพื่อให้ copy ทั้งโฟลเดอร์ไปวาง)
+          # และใช้ --delete เพื่อให้ไฟล์บน server ตรงกับบน git เป๊ะๆ
+          rsync -avz --delete \
+            --exclude '.git/' \
+            --exclude '.github/' \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./${{ env.SERVICE_DIR }}/ $DOCKER_HOST_STR:$DEPLOY_PATH/${{ env.SERVICE_DIR }}/
 
-          # 3. สั่ง Docker Compose Up
+          # 3. สั่งรัน Docker
           ssh -o StrictHostKeyChecking=no $DOCKER_HOST_STR "
             set -e
             cd $DEPLOY_PATH/${{ env.SERVICE_DIR }}
+            
+            # ตรวจสอบไฟล์ก่อนรัน
             if [ -f 'docker-compose.yaml' ] || [ -f 'docker-compose.yml' ]; then
               echo '✅ Found configuration, deploying...'
               docker compose -p '${{ env.PROJECT_NAME }}' up -d --remove-orphans
-              docker ps --filter name=${{ env.PROJECT_NAME }} --format 'table {{.Names}}\t{{.Status}}'
+              docker ps --filter name=${{ env.PROJECT_NAME }}
             else
-              echo '❌ Error: docker-compose.yaml not found in '$DEPLOY_PATH/${{ env.SERVICE_DIR }}
+              echo '❌ Error: docker-compose.yaml not found in '\$(pwd)
               ls -la
               exit 1
             fi
