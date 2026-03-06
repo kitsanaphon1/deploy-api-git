@@ -2,7 +2,8 @@ name: Deploy Microservices
 
 on:
   push:
-    branches: [ main ]  # ระบุ branch ให้ชัดเจน
+    branches:
+      - main
     paths:
       - 'Customer/**'
       - 'Invoice/**'
@@ -12,14 +13,13 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    
     steps:
-      - name: 1. Checkout code
+      - name: "Step 1: Checkout code"
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
 
-      - name: 2. Get changed service
+      - name: "Step 2: Get changed service"
         id: changed-files
         uses: tj-actions/changed-files@v44
         with:
@@ -33,7 +33,7 @@ jobs:
             Payment:
               - Payment/**
 
-      - name: 3. Set Service Environment
+      - name: "Step 3: Set Service Environment"
         run: |
           if [ "${{ steps.changed-files.outputs.Customer_any_changed }}" == "true" ]; then SERVICE="Customer";
           elif [ "${{ steps.changed-files.outputs.Invoice_any_changed }}" == "true" ]; then SERVICE="Invoice";
@@ -41,47 +41,33 @@ jobs:
           elif [ "${{ steps.changed-files.outputs.Payment_any_changed }}" == "true" ]; then SERVICE="Payment";
           fi
 
-          if [ -n "$SERVICE" ]; then
-            echo "SERVICE_DIR=$SERVICE" >> $GITHUB_ENV
-            echo "PROJECT_NAME=$(echo $SERVICE | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
-            echo "✅ Selected Service: $SERVICE"
-          else
+          if [ -z "$SERVICE" ]; then
             echo "❌ No matching service directory found."
             exit 1
           fi
 
-      - name: 4. Setup SSH Key
+          echo "SERVICE_DIR=$SERVICE" >> $GITHUB_ENV
+          echo "PROJECT_NAME=$(echo $SERVICE | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
+      - name: "Step 4: Setup SSH"
         uses: webfactory/ssh-agent@v0.9.0
         with:
           ssh-private-key: ${{ secrets.SSH_PRIVATE_KEY }}
 
-      - name: 5. Sync and Deploy via SSH
+      - name: "Step 5: Sync and Deploy"
         run: |
-          DEPLOY_PATH="/home/${{ secrets.REMOTE_USER }}/deploy/DEPLOY-APIFORLAB"
           DOCKER_HOST_STR="${{ secrets.REMOTE_USER }}@${{ secrets.REMOTE_HOST }}"
+          DEPLOY_PATH="/home/${{ secrets.REMOTE_USER }}/deploy/DEPLOY-APIFORLAB"
           
-          echo "🚀 Deploying Service: ${{ env.SERVICE_DIR }}"
-
-          # สร้างโฟลเดอร์ปลายทาง
+          echo "🚀 Deploying: ${{ env.SERVICE_DIR }}"
+          
           ssh -o StrictHostKeyChecking=no $DOCKER_HOST_STR "mkdir -p $DEPLOY_PATH/${{ env.SERVICE_DIR }}"
-
-          # ส่งไฟล์ (เอา / ออกจากท้ายต้นทาง)
-          rsync -avz --delete \
-            --exclude '.git/' \
-            --exclude '.github/' \
+          
+          rsync -avz --delete --exclude '.git/' --exclude '.github/' \
             -e "ssh -o StrictHostKeyChecking=no" \
             ./${{ env.SERVICE_DIR }}/ $DOCKER_HOST_STR:$DEPLOY_PATH/${{ env.SERVICE_DIR }}/
 
-          # สั่งรัน Docker
           ssh -o StrictHostKeyChecking=no $DOCKER_HOST_STR "
-            set -e
             cd $DEPLOY_PATH/${{ env.SERVICE_DIR }}
-            if [ -f 'docker-compose.yaml' ] || [ -f 'docker-compose.yml' ]; then
-              docker compose -p '${{ env.PROJECT_NAME }}' up -d --remove-orphans
-              docker ps --filter name=${{ env.PROJECT_NAME }}
-            else
-              echo '❌ Error: docker-compose.yaml not found'
-              ls -la
-              exit 1
-            fi
+            docker compose -p '${{ env.PROJECT_NAME }}' up -d --remove-orphans
           "
